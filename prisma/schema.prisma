@@ -21,8 +21,9 @@ model User {
   firstName String?
   lastName  String?
 
-  password String
-  books    Book[]
+  password            String
+  books               Book[]
+  passwordResetTokens PasswordResetToken[]
 }
 
 model Book {
@@ -37,4 +38,18 @@ model Book {
   user User @relation(fields: [userId], references: [id])
 
   @@index([userId])
+}
+
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  usedAt    DateTime?
+  tokenHash String    @unique
+  userId    Int
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
