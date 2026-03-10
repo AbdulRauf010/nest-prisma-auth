@@ -1,7 +1,9 @@
 import {
   BadRequestException,
   ConflictException,
+  InternalServerErrorException,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -9,9 +11,12 @@ import { PrismaService } from '../prisma/prisma.service';
 import * as bcrypt from 'bcrypt';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomBytes } from 'crypto';
+import * as nodemailer from 'nodemailer';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
@@ -49,7 +54,7 @@ export class AuthService {
   async forgotPassword(email: string) {
     const genericResponse = {
       message:
-        'If an account with that email exists, a password reset link has been sent.',
+        'If an account with that email exists, a password reset token has been sent.',
     };
 
     const user = await this.prisma.user.findUnique({
@@ -80,8 +85,7 @@ export class AuthService {
       }),
     ]);
 
-    // Replace this with your email provider integration.
-    console.log(`Password reset token for ${user.email}: ${resetToken}`);
+    await this.sendPasswordResetTokenEmail(user.email, resetToken);
 
     return genericResponse;
   }
@@ -135,5 +139,82 @@ export class AuthService {
       return 15;
     }
     return ttl;
+  }
+
+  private parseBoolean(value: string | undefined, defaultValue = false) {
+    if (value === undefined) {
+      return defaultValue;
+    }
+    return value.toLowerCase() === 'true';
+  }
+
+  private getEnvTrimmed(...keys: string[]) {
+    for (const key of keys) {
+      const value = process.env[key] ?? this.config.get<string>(key);
+      if (value !== undefined) {
+        const trimmed = value.trim();
+        if (trimmed.length > 0) {
+          return trimmed;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  private async sendPasswordResetTokenEmail(email: string, token: string) {
+    const host = this.getEnvTrimmed('MAIL_HOST', 'SMTP_HOST');
+    const portValue = this.getEnvTrimmed('MAIL_PORT', 'SMTP_PORT') ?? '587';
+    const port = Number(portValue);
+    const secure = this.parseBoolean(
+      this.getEnvTrimmed('MAIL_SECURE', 'SMTP_SECURE'),
+      false,
+    );
+    const user = this.getEnvTrimmed('MAIL_USER', 'SMTP_USER');
+    const pass = this.getEnvTrimmed(
+      'MAIL_PASSWORD',
+      'MAIL_PASS',
+      'SMTP_PASSWORD',
+      'SMTP_PASS',
+    );
+    const from =
+      this.getEnvTrimmed('MAIL_FROM', 'SMTP_FROM') ??
+      this.getEnvTrimmed('MAIL_USER', 'SMTP_USER');
+
+    const missingKeys: string[] = [];
+    if (!host) missingKeys.push('MAIL_HOST');
+    if (!user) missingKeys.push('MAIL_USER');
+    if (!pass) missingKeys.push('MAIL_PASSWORD');
+    if (!from) missingKeys.push('MAIL_FROM');
+    if (!Number.isFinite(port)) missingKeys.push('MAIL_PORT');
+
+    if (missingKeys.length > 0) {
+      this.logger.error(
+        `Email configuration invalid. Missing/invalid: ${missingKeys.join(', ')}`,
+      );
+      throw new InternalServerErrorException(
+        `Email configuration is missing or invalid: ${missingKeys.join(', ')}`,
+      );
+    }
+
+    const transporter = nodemailer.createTransport({
+      host,
+      port,
+      secure,
+      auth: { user, pass },
+    });
+
+    try {
+      await transporter.sendMail({
+        from,
+        to: email,
+        subject: 'Your password reset token',
+        text: `Your password reset token is: ${token}\nThis token expires in ${this.getResetTtlMinutes()} minutes.`,
+      });
+    } catch (error) {
+      this.logger.error('Failed to send password reset token email', error);
+      throw new InternalServerErrorException(
+        'Unable to send password reset token email',
+      );
+    }
   }
 }
